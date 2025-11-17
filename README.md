@@ -1,86 +1,116 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import os
 
 # Page config
-st.set_page_config(page_title="Excel Data Viewer", layout="wide")
-st.title("📊 Excel Data Viewer with Streamlit")
+st.set_page_config(page_title="Procurement Spending Dashboard 2023-24", layout="wide")
+st.title("📊 Procurement Spending Dashboard (FY 2023-24)")
 
-# --- File Upload ---
-uploaded_file = st.file_uploader("Upload your Excel file (.xlsx)", type=["xlsx"])
+# --- File Upload (for flexibility; assumes file is named as attached) ---
+uploaded_file = st.file_uploader(r"C:\Users\QlikSense\Downloads\ME2M Spent April 2023-March 2024.xlsx", type=["xlsx"])
 
 if uploaded_file is not None:
     try:
-        # Read Excel file
-        xl = pd.ExcelFile(uploaded_file)
-        sheet_names = xl.sheet_names
+        # Read Excel
+        df = pd.read_excel(uploaded_file, sheet_name="Sheet1", skiprows=0)  # Headers in row 1 (0-indexed)
         
-        # Sidebar: Select sheet
-        selected_sheet = st.sidebar.selectbox("Select Sheet", sheet_names)
+        # Clean data
+        df.columns = df.columns.str.strip().str.replace('\n', ' ').str.upper()  # Normalize headers
+        numeric_cols = ['PO QUANTITY', 'RATE INR', 'NET SPEND INR CR.']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['NET SPEND INR CR.'])  # Drop invalid spends
         
-        # Read selected sheet
-        df = xl.parse(selected_sheet)
+        st.success(f"Loaded data: {df.shape[0]} rows, {df.shape[1]} columns")
         
-        st.success(f"Loaded sheet: **{selected_sheet}** | Rows: {df.shape[0]}, Columns: {df.shape[1]}")
+        # --- Sidebar Filters ---
+        st.sidebar.header("Filters")
+        selected_periods = st.sidebar.multiselect("Select Periods", options=sorted(df['PERIOD'].unique()), default=df['PERIOD'].unique())
+        selected_categories = st.sidebar.multiselect("Select Categories", options=sorted(df['CATEGORY'].unique()), default=df['CATEGORY'].unique())
+        selected_vendors = st.sidebar.multiselect("Select Vendors (Top 20 by Spend)", 
+                                                  options=df.groupby('VENDOR')['NET SPEND INR CR.'].sum().nlargest(20).index)
+        min_spend, max_spend = st.sidebar.slider("Net Spend Range (INR Cr.)", 
+                                                 float(df['NET SPEND INR CR.'].min()), 
+                                                 float(df['NET SPEND INR CR.'].max()), 
+                                                 (0.0, float(df['NET SPEND INR CR.'].max())))
         
-        # --- Display Raw Data ---
-        with st.expander("View Raw Data", expanded=False):
-            st.dataframe(df, use_container_width=True)
+        # Apply filters
+        df_filtered = df[
+            (df['PERIOD'].isin(selected_periods)) &
+            (df['CATEGORY'].isin(selected_categories)) &
+            (df['NET SPEND INR CR.'].between(min_spend, max_spend))
+        ]
+        if selected_vendors:
+            df_filtered = df_filtered[df_filtered['VENDOR'].isin(selected_vendors)]
         
-        # --- Search & Filter ---
-        st.subheader("🔍 Search & Filter")
-        col1, col2 = st.columns(2)
+        # --- Overview Metrics ---
+        st.header("Overview")
+        col1, col2, col3, col4 = st.columns(4)
+        total_spend = df_filtered['NET SPEND INR CR.'].sum()
+        num_pos = df_filtered['PO_NUMBER_SP'].nunique()
+        num_vendors = df_filtered['VENDOR'].nunique()
+        avg_spend = total_spend / num_pos if num_pos > 0 else 0
         
-        with col1:
-            search_col = st.selectbox("Search in Column", options=["None"] + list(df.columns))
-            if search_col != "None":
-                search_term = st.text_input(f"Search in {search_col}")
-                if search_term:
-                    df_filtered = df[df[search_col].astype(str).str.contains(search_term, case=False, na=False)]
-                else:
-                    df_filtered = df.copy()
-            else:
-                df_filtered = df.copy()
+        col1.metric("Total Net Spend (INR Cr.)", f"{total_spend:,.2f}")
+        col2.metric("Number of POs", f"{num_pos:,}")
+        col3.metric("Number of Vendors", f"{num_vendors:,}")
+        col4.metric("Avg Spend per PO (INR Cr.)", f"{avg_spend:,.2f}")
         
-        with col2:
-            # Optional: Filter by column value
-            filter_col = st.selectbox("Filter by Column", options=["None"] + list(df.columns))
-            if filter_col != "None":
-                unique_vals = df[filter_col].dropna().unique()
-                selected_val = st.multiselect(f"Select {filter_col} values", options=unique_vals)
-                if selected_val:
-                    df_filtered = df_filtered[df_filtered[filter_col].isin(selected_val)]
+        # --- Charts ---
+        st.header("Visualizations")
         
-        # Show filtered data
-        if 'df_filtered' in locals():
-            st.dataframe(df_filtered, use_container_width=True)
-            
-            # --- Download filtered data ---
-            csv = df_filtered.to_csv(index=False).encode()
-            st.download_button(
-                label="📥 Download Filtered Data as CSV",
-                data=csv,
-                file_name=f"filtered_{selected_sheet}.csv",
-                mime="text/csv"
-            )
+        # Spend by Period (Monthly Trend)
+        spend_by_period = df_filtered.groupby('PERIOD')['NET SPEND INR CR.'].sum().reset_index()
+        fig_period = px.line(spend_by_period, x='PERIOD', y='NET SPEND INR CR.', 
+                             title="Spend Trend by Period", markers=True)
+        st.plotly_chart(fig_period, use_container_width=True)
         
-        # --- Summary Stats ---
-        st.subheader("📈 Summary Statistics")
-        st.write(df.describe(include='all'))
+        # Spend by Category (Pie Chart)
+        spend_by_category = df_filtered.groupby('CATEGORY')['NET SPEND INR CR.'].sum().reset_index()
+        fig_category = px.pie(spend_by_category, values='NET SPEND INR CR.', names='CATEGORY', 
+                              title="Spend Distribution by Category")
+        st.plotly_chart(fig_category, use_container_width=True)
         
-        # --- Column Info ---
-        with st.expander("Column Info"):
-            st.write(df.dtypes.reset_index().rename(columns={"index": "Column", 0: "Data Type"}))
+        # Top 10 Vendors by Spend (Bar Chart)
+        top_vendors = df_filtered.groupby('VENDOR')['NET SPEND INR CR.'].sum().nlargest(10).reset_index()
+        fig_vendors = px.bar(top_vendors, x='NET SPEND INR CR.', y='VENDOR', 
+                             title="Top 10 Vendors by Spend", orientation='h')
+        st.plotly_chart(fig_vendors, use_container_width=True)
+        
+        # Top 10 Materials by Spend (Bar Chart)
+        top_materials = df_filtered.groupby('MAT.DESC')['NET SPEND INR CR.'].sum().nlargest(10).reset_index()
+        fig_materials = px.bar(top_materials, x='NET SPEND INR CR.', y='MAT.DESC', 
+                               title="Top 10 Materials by Spend", orientation='h')
+        st.plotly_chart(fig_materials, use_container_width=True)
+        
+        # --- Data Table ---
+        st.header("Detailed Data")
+        st.dataframe(df_filtered.style.format({
+            'PO QUANTITY': '{:,.2f}',
+            'RATE INR': '{:,.2f}',
+            'NET SPEND INR CR.': '{:,.2f}'
+        }), use_container_width=True)
+        
+        # Download filtered data
+        csv = df_filtered.to_csv(index=False).encode()
+        st.download_button(
+            label="📥 Download Filtered Data as CSV",
+            data=csv,
+            file_name="filtered_spending_data.csv",
+            mime="text/csv"
+        )
     
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error loading file: {e}")
 
 else:
-    st.info("👆 Please upload an Excel (.xlsx) file to get started.")
+    st.info("👆 Upload the Excel file to start analyzing. Expected sheet: 'Sheet1' with procurement data.")
     st.markdown("""
-    ### Sample Use:
-    1. Upload an Excel file
-    2. Select a sheet
-    3. Search, filter, and explore data
-    4. Download results
+    ### Dashboard Features:
+    - **Overview Metrics**: Total spend, POs, vendors.
+    - **Filters**: Period, category, vendor, spend range.
+    - **Charts**: Trends, distributions, top vendors/materials.
+    - **Interactive Table**: Sort, filter, download.
     """)
